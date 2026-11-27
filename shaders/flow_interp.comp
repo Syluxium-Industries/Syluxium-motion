@@ -1,0 +1,232 @@
+#version 450
+// Copyright (c) 2026 Syluxium Industries.
+// SPDX-License-Identifier: MIT
+// Syluxium Motion: open source under the MIT License, see LICENSE.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "flow_common.glsl"
+layout(binding = 1) uniform sampler smp;
+layout(binding = 2) uniform texture2D prevF;
+layout(binding = 3) uniform texture2D curF;
+layout(binding = 4) uniform texture2D flow;
+layout(binding = 5) uniform texture2D prevG;
+layout(binding = 6) uniform texture2D curG;
+layout(binding = 7) uniform texture2D still;
+layout(binding = 8) uniform texture2D stillBefore;
+layout(binding = 9) uniform texture2D prevD;
+layout(binding = 10) uniform texture2D curD;
+layout(binding = 11) uniform writeonly image2D dst;
+
+const int kCands = 10;
+const float kReach = 12.0;
+const float kFar = 28.0;
+const float kGood = 0.05;
+const float kBias = 0.015;
+const float kOneSided = 0.06;
+const float kObject = 0.05;
+const float kUnsupported = 0.06;
+const float kDifferent = 0.15;
+const float kRingNear = 48.0;
+const float kRingFar = 112.0;
+const float kStill = 2.5 / 255.0;
+const float kDepthSplit = 0.3;
+const float kSplitCost = 0.04;
+
+ivec2 frameSize;
+bool covering;
+bool isStill(vec2 uv) {
+    return texelFetch(sampler2D(still, smp), clamp(ivec2(uv * vec2(frameSize)), ivec2(0), frameSize - 1), 0).r > kStill;
+}
+bool onFrame(vec2 uv) { return all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0))); }
+bool usable(vec2 uv, vec2 motion) { return onFrame(uv) && (covering || dot(motion, motion) == 0.0 || !isStill(uv)); }
+
+float match(vec3 prevC, vec3 curC, float gain) {
+    const vec3 d = abs(prevC * gain - curC / gain);
+    return C.hdr != 0u ? luma(d) : dot(d, vec3(1.0));
+}
+
+vec2 ringAt(vec2 uv, vec2 px, int i) {
+    const float ang = 6.2831853 * (float(i) + 0.5) / 8.0;
+    return textureLod(sampler2D(flow, smp), uv + (i < 8 ? kRingNear : kRingFar) * vec2(cos(ang), sin(ang)) / px, 0.0).xy;
+}
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(dst);
+    if (any(greaterThanEqual(p, size))) return;
+    const vec2 uv = (vec2(p) + 0.5) / vec2(size);
+    const float t = C.timestamp;
+    frameSize = size;
+
+    if (isStill(uv)) {
+        imageStore(dst, p, mix(textureLod(sampler2D(prevF, smp), uv, 0.0), textureLod(sampler2D(curF, smp), uv, 0.0), t));
+        return;
+    }
+
+    covering = texelFetch(sampler2D(stillBefore, smp), p, 0).r > kStill;
+
+    vec2 v = textureLod(sampler2D(flow, smp), uv, 0.0).xy;
+    for (int i = 0; i < 3; ++i) v = textureLod(sampler2D(flow, smp), uv - (t - 0.5) * v, 0.0).xy;
+
+    const float lp = textureLod(sampler2D(prevG, smp), uv - t * v, 0.0).r;
+    const float lc = textureLod(sampler2D(curG, smp), uv + (1.0 - t) * v, 0.0).r;
+    const float gain = sqrt(clamp((lc + 0.02) / (lp + 0.02), 0.25, 4.0));
+
+    vec2 cand[kCands];
+    cand[0] = v;
+    cand[1] = vec2(0.0);
+    const vec2 dirs[4] = vec2[](vec2(1.0, 0.0), vec2(-1.0, 0.0), vec2(0.0, 1.0), vec2(0.0, -1.0));
+    for (int i = 0; i < 4; ++i) {
+        cand[2 + i] = textureLod(sampler2D(flow, smp), uv + dirs[i] * kReach / vec2(size), 0.0).xy;
+        cand[6 + i] = textureLod(sampler2D(flow, smp), uv + dirs[i] * kFar / vec2(size), 0.0).xy;
+    }
+
+    const vec2 px = vec2(size);
+    float spread = 0.0;
+    for (int i = 2; i < kCands; ++i) spread = max(spread, length((cand[i] - v) * px));
+    bool layered = false;
+    uint lonely = 0u;
+    bool edge = spread > 3.0 + 0.15 * length(v * px);
+    if (edge) {
+        int same = 0;
+        for (int i = 2; i < kCands; ++i) same += int(length((cand[i] - v) * px) < 1.5 + 0.1 * length(v * px));
+        const vec2 ua = uv - t * v, ub = uv + (1.0 - t) * v;
+        const vec3 d = abs(textureLod(sampler2D(prevF, smp), ua, 0.0).rgb * gain - textureLod(sampler2D(curF, smp), ub, 0.0).rgb / gain);
+        edge = !(same >= 5 && onFrame(ua) && onFrame(ub) && (C.hdr != 0u ? luma(d) : dot(d, vec3(1.0))) < kGood);
+    }
+    if (edge) {
+        uint votesLo = 0u, votesHi = 0u;
+        for (int j = 0; j < 16; ++j) {
+            const vec2 r = ringAt(uv, px, j);
+            for (int i = 0; i < kCands; ++i)
+                if (length((r - cand[i]) * px) < 1.5 + 0.1 * length(cand[i] * px)) {
+                    if (i < 5) votesLo += 1u << (5 * i);
+                    else votesHi += 1u << (5 * (i - 5));
+                }
+        }
+        int back = 0, backVotes = -1;
+        for (int i = 0; i < kCands; ++i) {
+            const int votes = int((i < 5 ? votesLo >> (5 * i) : votesHi >> (5 * (i - 5))) & 31u);
+            if (votes > backVotes) { backVotes = votes; back = i; }
+            if (votes < 2 && i < 6) lonely |= 1u << i;
+        }
+        layered = backVotes >= 6;
+        if (!layered) lonely = 0u;
+        vec2 vb = vec2(0.0);
+        float nb = 0.0;
+        for (int j = 0; j < 16; ++j)
+            if (length((ringAt(uv, px, j) - cand[back]) * px) < 1.5 + 0.1 * length(cand[back] * px)) { vb += ringAt(uv, px, j); nb += 1.0; }
+        vb = nb > 0.0 ? vb / nb : cand[back];
+        const vec2 ua = uv - t * vb, ub = uv + (1.0 - t) * vb;
+        if (layered && onFrame(ua) && onFrame(ub)) {
+            const vec4 a = textureLod(sampler2D(prevF, smp), ua, 0.0);
+            const vec4 b = textureLod(sampler2D(curF, smp), ub, 0.0);
+            const vec3 dab = abs(a.rgb * gain - b.rgb / gain);
+            float bestRes = (C.hdr != 0u ? luma(dab) : dot(dab, vec3(1.0))) > kDifferent ? kObject : 0.0;
+            vec4 oneSided = vec4(0.0);
+            vec2 tried0 = vb, tried1 = vb, tried2 = vb;
+            int nTried = 0;
+            bool explained = false;
+            for (int i = 0; i < kCands + 16 && nTried < 4; ++i) {
+                vec2 vf;
+                if (i < 16) vf = ringAt(uv, px, i);
+                else vf = cand[kCands - 1 - (i - 16)];
+                if (length((vf - vb) * px) < 2.0 + 0.1 * length(vb * px)) continue;
+                if (min(min(length((vf - tried0) * px), length((vf - tried1) * px)), length((vf - tried2) * px)) < 0.75) continue;
+                tried2 = tried1; tried1 = tried0; tried0 = vf;
+                ++nTried;
+                const vec2 xa = uv - t * vf, xb = uv + (1.0 - t) * vf;
+                if (match(textureLod(sampler2D(prevF, smp), xa, 0.0).rgb, textureLod(sampler2D(curF, smp), xb, 0.0).rgb, gain) < kGood) {
+                    explained = true;
+                    break;
+                }
+                const float ra = match(a.rgb, textureLod(sampler2D(curF, smp), ua + vf, 0.0).rgb, gain);
+                const float rb = match(textureLod(sampler2D(prevF, smp), ub - vf, 0.0).rgb, b.rgb, gain);
+                const bool objA = ra < rb;
+                const float rObj = objA ? ra : rb, rOther = objA ? rb : ra;
+                if (rObj >= bestRes) continue;
+                float side = 1e9;
+                for (int k = -1; k <= 1; k += 2) {
+                    const vec2 o = float(k) * vec2(2.0, 2.0) / px;
+                    side = min(side, objA ? match(textureLod(sampler2D(prevF, smp), ua + o, 0.0).rgb,
+                                                  textureLod(sampler2D(curF, smp), ua + o + vf, 0.0).rgb, gain)
+                                          : match(textureLod(sampler2D(prevF, smp), ub + o - vf, 0.0).rgb,
+                                                  textureLod(sampler2D(curF, smp), ub + o, 0.0).rgb, gain));
+                }
+                if (side >= kObject) continue;
+                const float firm = 0.35 * length((vf - vb) * px);
+                const vec2 fa = textureLod(sampler2D(flow, smp), uv + t * (vf - vb), 0.0).xy;
+                const vec2 fb = textureLod(sampler2D(flow, smp), uv - (1.0 - t) * (vf - vb), 0.0).xy;
+                const vec2 fObj = objA ? fa : fb, fOther = objA ? fb : fa;
+                if (length((fOther - vf) * px) < firm) continue;
+                const bool framesSure = rOther >= 2.5 * rObj + 0.02;
+                const bool fieldSure = length((fOther - vb) * px) < firm && length((fObj - vf) * px) < firm;
+                if (!framesSure && !fieldSure) continue;
+                const vec2 across = 1.5 * normalize((vf - vb) * px) / px;
+                for (int k = -1; k <= 1; k += 2)
+                    explained = explained || match(textureLod(sampler2D(prevF, smp), xa + float(k) * across, 0.0).rgb,
+                                                   textureLod(sampler2D(curF, smp), xb + float(k) * across, 0.0).rgb, gain) < kGood;
+                if (explained) break;
+                bestRes = rObj;
+                oneSided = objA ? b : a;
+            }
+            if (!explained && bestRes > 0.0 && bestRes < kObject) {
+                imageStore(dst, p, oneSided);
+                return;
+            }
+        }
+    }
+
+    bool occlusion = false;
+    if (C.depthMode != 0u) {
+        const ivec2 ds = textureSize(sampler2D(prevD, smp), 0);
+        const ivec2 dp = clamp(ivec2(uv * vec2(ds)), ivec2(0), ds - 1);
+        occlusion = depthGap(texelFetch(sampler2D(prevD, smp), dp, 0).r, texelFetch(sampler2D(curD, smp), dp, 0).r) > kDepthSplit;
+    }
+    vec4 outc = vec4(0.0);
+    float bestErr = 1e30;
+    for (int i = 0; i < kCands; ++i) {
+        const vec2 ua = uv - t * cand[i], ub = uv + (1.0 - t) * cand[i];
+        const vec4 a = textureLod(sampler2D(prevF, smp), ua, 0.0);
+        const vec4 b = textureLod(sampler2D(curF, smp), ub, 0.0);
+        const bool ia = usable(ua, cand[i]), ib = usable(ub, cand[i]);
+        const vec3 d = abs(a.rgb * gain - b.rgb / gain);
+        const float diff = C.hdr != 0u ? luma(d) : dot(d, vec3(1.0));
+        float err;
+        vec4 c;
+        float gap = 0.0;
+        if (occlusion && ia && ib) {
+            const ivec2 ds = textureSize(sampler2D(prevD, smp), 0);
+            gap = min(depthGap(texelFetch(sampler2D(prevD, smp), clamp(ivec2(ua * vec2(ds)), ivec2(0), ds - 1), 0).r,
+                               texelFetch(sampler2D(curD, smp), clamp(ivec2(ub * vec2(ds)), ivec2(0), ds - 1), 0).r), 1.0);
+        }
+        if (gap > kDepthSplit) {
+            const ivec2 ds = textureSize(sampler2D(prevD, smp), 0);
+            const float da = texelFetch(sampler2D(prevD, smp), clamp(ivec2(ua * vec2(ds)), ivec2(0), ds - 1), 0).r;
+            const float db = texelFetch(sampler2D(curD, smp), clamp(ivec2(ub * vec2(ds)), ivec2(0), ds - 1), 0).r;
+            const bool aNearer = C.depthMode == 2u ? da > db : da < db;
+            err = kOneSided + kSplitCost;
+            c = aNearer ? b : a;
+        } else if ((ia && ib) || (diff < kGood && onFrame(ua) && onFrame(ub))) {
+            err = diff;
+            c = mix(a, b, t);
+        } else if (ia || ib) {
+            err = kOneSided;
+            c = ia ? a : b;
+        } else {
+            err = 1.0;
+            c = mix(a, b, t);
+        }
+        if (i == 0) {
+            outc = c;
+            bestErr = err;
+            if (err < kGood && (lonely & 1u) == 0u) break;
+            if ((lonely & 1u) != 0u) bestErr += kUnsupported;
+            continue;
+        }
+        err += kBias + ((lonely >> i & 1u) != 0u ? kUnsupported : 0.0);
+        if (err < bestErr) { bestErr = err; outc = c; }
+    }
+    if (covering && bestErr > kOneSided) outc = textureLod(sampler2D(prevF, smp), uv, 0.0);
+    imageStore(dst, p, outc);
+}

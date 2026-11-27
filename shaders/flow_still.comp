@@ -1,0 +1,23 @@
+#version 450
+// Copyright (c) 2026 Syluxium Industries.
+// SPDX-License-Identifier: MIT
+// Syluxium Motion: open source under the MIT License, see LICENSE.
+#extension GL_GOOGLE_include_directive : require
+layout(local_size_x = 8, local_size_y = 8) in;
+#include "flow_common.glsl"
+layout(binding = 1) uniform sampler smp;
+layout(binding = 2) uniform texture2D prevF;
+layout(binding = 3) uniform texture2D curF;
+layout(binding = 4) uniform texture2D prevStill;
+layout(binding = 5, r8) uniform writeonly image2D dst;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(dst)))) return;
+    const vec3 a = texelFetch(sampler2D(prevF, smp), p, 0).rgb;
+    const vec3 b = texelFetch(sampler2D(curF, smp), p, 0).rgb;
+    const vec3 d = abs(a - b);
+    const float limit = 1.5 / 255.0 * (C.hdr != 0u ? 1.0 + max(max(b.r, b.g), b.b) : 1.0);
+    const float n = texelFetch(sampler2D(prevStill, smp), p, 0).r * 255.0;
+    imageStore(dst, p, vec4(max(max(d.r, d.g), d.b) <= limit ? min(n + 1.0, 255.0) / 255.0 : 0.0));
+}

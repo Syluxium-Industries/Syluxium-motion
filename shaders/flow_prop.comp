@@ -1,0 +1,91 @@
+#version 450
+// Copyright (c) 2026 Syluxium Industries.
+// SPDX-License-Identifier: MIT
+// Syluxium Motion: open source under the MIT License, see LICENSE.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler smp;
+layout(binding = 1) uniform texture2D prevL;
+layout(binding = 2) uniform texture2D curL;
+layout(binding = 3) uniform texture2D src;
+layout(binding = 4, rg32f) uniform writeonly image2D dst;
+
+const int kBlock = 4;
+const float kUnknown = 0.02;
+const int kWin = 4;
+const float kSmooth = 0.01;
+const float kCap = 2.0;
+
+vec2 levelSize;
+
+float cost(vec2 centre, vec2 v) {
+    vec2 a[16], b[16];
+    float w[16];
+    vec2 ma = vec2(0.0), mb = vec2(0.0);
+    float n = 0.0;
+    int i = 0;
+    for (int y = -kWin; y < kWin; y += 2)
+        for (int x = -kWin; x < kWin; x += 2, ++i) {
+            const vec2 q = centre + vec2(x, y) + 0.5;
+            const vec2 qa = (q - 0.5 * v) / levelSize, qb = (q + 0.5 * v) / levelSize;
+            const vec2 lo = min(qa, qb), hi = max(qa, qb);
+            w[i] = lo.x >= 0.0 && lo.y >= 0.0 && hi.x <= 1.0 && hi.y <= 1.0 ? 1.0 : 0.0;
+            a[i] = textureLod(sampler2D(prevL, smp), qa, 0.0).rg;
+            b[i] = textureLod(sampler2D(curL, smp), qb, 0.0).rg;
+            ma += w[i] * a[i];
+            mb += w[i] * b[i];
+            n += w[i];
+        }
+    if (n < 6.0) return kUnknown;
+    ma /= n;
+    mb /= n;
+    float s = 0.0, va = 0.0, vb = 0.0, cov = 0.0;
+    for (int j = 0; j < 16; ++j) {
+        const vec2 da = a[j] - ma, db = b[j] - mb;
+        s += w[j] * (abs(da.x - db.x) + abs(da.y - db.y));
+        va += w[j] * dot(da, da);
+        vb += w[j] * dot(db, db);
+        cov += w[j] * dot(da, db);
+    }
+    const float zsad = s / n;
+    const float energy = sqrt(va * vb);
+    const float ncc = energy > 1e-8 ? cov / energy : 1.0;
+    const float textured = clamp(sqrt(min(va, vb) / n) / 0.02, 0.0, 1.0);
+    return mix(zsad, 0.1 * (1.0 - ncc), textured);
+}
+
+float disagreement(vec2 c, vec2 n[12]) {
+    float s = 0.0;
+    for (int i = 0; i < 8; ++i) s += min(length(c - n[i]), kCap);
+    return kSmooth * s / 8.0;
+}
+
+void main() {
+    const ivec2 b = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 grid = imageSize(dst);
+    if (any(greaterThanEqual(b, grid))) return;
+    levelSize = vec2(textureSize(sampler2D(curL, smp), 0));
+    const vec2 centre = (vec2(b) + 0.5) * float(kBlock);
+
+    const vec2 own = texelFetch(sampler2D(src, smp), b, 0).xy * levelSize;
+    const ivec2 offs[12] = ivec2[](ivec2(1, 0), ivec2(-1, 0), ivec2(0, 1), ivec2(0, -1), ivec2(1, 1), ivec2(-1, 1),
+                                   ivec2(1, -1), ivec2(-1, -1), ivec2(4, 0), ivec2(-4, 0), ivec2(0, 4), ivec2(0, -4));
+    vec2 n[12];
+    for (int i = 0; i < 12; ++i)
+        n[i] = texelFetch(sampler2D(src, smp), clamp(b + offs[i], ivec2(0), grid - 1), 0).xy * levelSize;
+
+    vec2 best = own;
+    float bestCost = cost(centre, own) + disagreement(own, n);
+    for (int i = 0; i < 12; ++i) {
+        const float k = cost(centre, n[i]) + disagreement(n[i], n);
+        if (k < bestCost) { bestCost = k; best = n[i]; }
+    }
+    const vec2 start = best;
+    for (int y = -1; y <= 1; ++y)
+        for (int x = -1; x <= 1; ++x) {
+            if (x == 0 && y == 0) continue;
+            const vec2 c = start + 0.5 * vec2(x, y);
+            const float k = cost(centre, c) + disagreement(c, n);
+            if (k < bestCost) { bestCost = k; best = c; }
+        }
+    imageStore(dst, b, vec4(best / levelSize, 0.0, 0.0));
+}

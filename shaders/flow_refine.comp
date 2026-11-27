@@ -1,0 +1,74 @@
+#version 450
+// Copyright (c) 2026 Syluxium Industries.
+// SPDX-License-Identifier: MIT
+// Syluxium Motion: open source under the MIT License, see LICENSE.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler smp;
+layout(binding = 1) uniform texture2D prevL;
+layout(binding = 2) uniform texture2D curL;
+layout(binding = 3) uniform texture2D blocks;
+layout(binding = 4, rg32f) uniform writeonly image2D dst;
+
+const int kWin = 2;
+const float kSwitch = 0.70;
+const float kFloor = 0.008;
+const float kMatched = 0.020;
+
+vec2 levelSize;
+
+float cost(vec2 q, vec2 v) {
+    vec2 a[25], b[25];
+    vec2 ma = vec2(0.0), mb = vec2(0.0);
+    int i = 0;
+    for (int y = -kWin; y <= kWin; ++y)
+        for (int x = -kWin; x <= kWin; ++x, ++i) {
+            const vec2 c = q + vec2(x, y);
+            a[i] = textureLod(sampler2D(prevL, smp), (c - 0.5 * v) / levelSize, 0.0).rg;
+            b[i] = textureLod(sampler2D(curL, smp), (c + 0.5 * v) / levelSize, 0.0).rg;
+            ma += a[i];
+            mb += b[i];
+        }
+    ma /= 25.0;
+    mb /= 25.0;
+    float s = 0.0;
+    for (int k = 0; k < 25; ++k) {
+        const vec2 d = abs((a[k] - ma) - (b[k] - mb));
+        s += d.x + 0.5 * d.y;
+    }
+    return s / 25.0;
+}
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(dst);
+    if (any(greaterThanEqual(p, size))) return;
+    levelSize = vec2(size);
+    const ivec2 grid = textureSize(sampler2D(blocks, smp), 0);
+    const vec2 q = vec2(p) + 0.5;
+    const vec2 uv = q / levelSize;
+
+    const vec2 even = textureLod(sampler2D(blocks, smp), uv, 0.0).xy;
+    const ivec2 b0 = ivec2(floor(q / 4.0));
+    vec2 lo = vec2(1e9), hi = vec2(-1e9);
+    for (int i = 0; i < 9; ++i) {
+        const vec2 v = texelFetch(sampler2D(blocks, smp), clamp(b0 + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), grid - 1), 0).xy;
+        lo = min(lo, v);
+        hi = max(hi, v);
+    }
+    if (all(lessThan((hi - lo) * levelSize, vec2(0.5)))) {
+        imageStore(dst, p, vec4(even, 0.0, 0.0));
+        return;
+    }
+    vec2 best = even;
+    const float flatCost = cost(q, even * levelSize);
+    float bestCost = flatCost;
+    for (int i = 0; i < 9; ++i) {
+        const ivec2 b = clamp(b0 + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), grid - 1);
+        const vec2 v = texelFetch(sampler2D(blocks, smp), b, 0).xy;
+        if (distance(v * levelSize, even * levelSize) < 0.5) continue;
+        const float c = cost(q, v * levelSize);
+        if (c < bestCost) { bestCost = c; best = v; }
+    }
+    if (!(bestCost < kSwitch * flatCost && flatCost - bestCost > kFloor && bestCost < kMatched)) best = even;
+    imageStore(dst, p, vec4(best, 0.0, 0.0));
+}

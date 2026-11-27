@@ -1,0 +1,25 @@
+#version 450
+// Copyright (c) 2026 Syluxium Industries.
+// SPDX-License-Identifier: MIT
+// Syluxium Motion: open source under the MIT License, see LICENSE.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler smp;
+layout(binding = 1) uniform texture2D src;
+layout(binding = 2, rg32f) uniform writeonly image2D dst;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(dst);
+    if (any(greaterThanEqual(p, size))) return;
+    vec2 v[9];
+    for (int i = 0; i < 9; ++i)
+        v[i] = texelFetch(sampler2D(src, smp), clamp(p + ivec2(i % 3 - 1, i / 3 - 1), ivec2(0), size - 1), 0).xy;
+    int best = 4;
+    float bestSum = 1e30;
+    for (int i = 0; i < 9; ++i) {
+        float s = 0.0;
+        for (int j = 0; j < 9; ++j) s += distance(v[i], v[j]);
+        if (s < bestSum) { bestSum = s; best = i; }
+    }
+    imageStore(dst, p, vec4(v[best], 0.0, 0.0));
+}

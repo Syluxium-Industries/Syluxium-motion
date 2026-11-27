@@ -1,0 +1,31 @@
+#version 450
+// Copyright (c) 2026 Syluxium Industries.
+// SPDX-License-Identifier: MIT
+// Syluxium Motion: open source under the MIT License, see LICENSE.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler smp;
+layout(binding = 1) uniform texture2D src;
+layout(binding = 2, rg16f) uniform writeonly image2D dst;
+
+void main() {
+    const ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    const ivec2 size = imageSize(dst);
+    if (any(greaterThanEqual(p, size))) return;
+    const vec2 srcSize = vec2(textureSize(sampler2D(src, smp), 0));
+    const vec2 ratio = srcSize / vec2(size);
+    const float r = max(ratio.x, ratio.y);
+    const float var = max(1.25 * (r * r - 1.0) / 3.0 - 0.25, 0.3);
+    const int radius = int(ceil(1.1 * sqrt(var)));
+    const vec2 centre = floor((vec2(p) + 0.5) * ratio + 0.5);
+    vec2 sum = vec2(0.0);
+    float wsum = 0.0;
+    for (int y = -radius; y <= radius; ++y) {
+        const float wy = exp(-2.0 * float(y * y) / var);
+        for (int x = -radius; x <= radius; ++x) {
+            const float w = wy * exp(-2.0 * float(x * x) / var);
+            sum += w * textureLod(sampler2D(src, smp), (centre + 2.0 * vec2(x, y)) / srcSize, 0.0).rg;
+            wsum += w;
+        }
+    }
+    imageStore(dst, p, vec4(sum / wsum, 0.0, 0.0));
+}
