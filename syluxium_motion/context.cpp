@@ -291,7 +291,7 @@ void Context::buildFlowGraph() {
             const int passes = l == 0 ? 2 : l == 1 ? 2 : l == 2 ? 1 : 0;
             Image* from = raw[l];
             Image* to = tmp[l];
-            add(list, "flow.search", Binds(*this).smp(S::Edge).tex(pyr[prev][l]).tex(pyr[cur][l]).tex(coarse).out(from),
+            add(list, L >= 3 && l == L - 2 ? "flow.search.wide" : "flow.search", Binds(*this).smp(S::Edge).tex(pyr[prev][l]).tex(pyr[cur][l]).tex(coarse).tex(smooth[0]).out(from),
                 grid(levels[l]), 8);
             for (int i = 0; i < passes; ++i) {
                 add(list, "flow.prop", Binds(*this).smp(S::Edge).tex(pyr[prev][l]).tex(pyr[cur][l]).tex(from).out(to),

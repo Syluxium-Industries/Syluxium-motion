@@ -7,12 +7,14 @@ layout(binding = 0) uniform sampler smp;
 layout(binding = 1) uniform texture2D prevL;
 layout(binding = 2) uniform texture2D curL;
 layout(binding = 3) uniform texture2D coarse;
-layout(binding = 4, rg32f) uniform writeonly image2D dst;
+layout(binding = 4) uniform texture2D history;
+layout(binding = 5, rg32f) uniform writeonly image2D dst;
 
 const int kBlock = 4;
 const float kUnknown = 0.02;
 const int kWin = 4;
 const float kSmooth = 0.004;
+const float kFarJump = 0.015;
 
 vec2 levelSize;
 
@@ -79,8 +81,22 @@ void main() {
         }
     }
 
+    const ivec2 hgrid = textureSize(sampler2D(history, smp), 0);
+    if (hgrid.x > 1) {
+        const vec2 huv = centre / levelSize;
+        const ivec2 hb = clamp(ivec2(huv * vec2(hgrid)), ivec2(0), hgrid - 1);
+        const vec2 h0 = texelFetch(sampler2D(history, smp), hb, 0).xy;
+        const ivec2 hb1 = clamp(ivec2((huv - h0) * vec2(hgrid)), ivec2(0), hgrid - 1);
+        const vec2 hc[2] = vec2[](h0 * levelSize, texelFetch(sampler2D(history, smp), hb1, 0).xy * levelSize);
+        for (int i = 0; i < 2; ++i) {
+            if (any(isnan(hc[i])) || dot(hc[i] - best, hc[i] - best) < 1.0) continue;
+            const float k = cost(centre, hc[i]) + kSmooth * length(hc[i] - pred);
+            if (k < bestCost) { bestCost = k; best = hc[i]; }
+        }
+    }
+
 #ifdef WIDE
-    const int radius = coarsest ? 4 : 3;
+    const int radius = coarsest ? 4 : 8;
 #else
     const int radius = coarsest ? 4 : 1;
 #endif
@@ -89,7 +105,7 @@ void main() {
         for (int x = -radius; x <= radius; ++x) {
             if (x == 0 && y == 0) continue;
             const vec2 c = start + vec2(x, y);
-            const float k = cost(centre, c) + kSmooth * length(c - pred);
+            const float k = cost(centre, c) + kSmooth * length(c - pred) + (max(abs(x), abs(y)) > 3 ? kFarJump : 0.0);
             if (k < bestCost) { bestCost = k; best = c; }
         }
     start = best;

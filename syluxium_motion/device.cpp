@@ -371,9 +371,9 @@ void Device::buildPipelines() {
     addPipeline("flow.luma", kFlow_luma, std::size(kFlow_luma), spec({K::UniformBuffer, K::Sampler, K::SampledImage, K::StorageImage}), wg);
     addPipeline("flow.down", kFlow_down, std::size(kFlow_down), spec({K::Sampler, K::SampledImage, K::StorageImage}), wg);
     addPipeline("flow.search", kFlow_search, std::size(kFlow_search),
-                spec({K::Sampler, K::SampledImage, K::SampledImage, K::SampledImage, K::StorageImage}), wg);
+                spec({K::Sampler, K::SampledImage, K::SampledImage, K::SampledImage, K::SampledImage, K::StorageImage}), wg);
     addPipeline("flow.search.wide", kFlow_search_wide, std::size(kFlow_search_wide),
-                spec({K::Sampler, K::SampledImage, K::SampledImage, K::SampledImage, K::StorageImage}), wg);
+                spec({K::Sampler, K::SampledImage, K::SampledImage, K::SampledImage, K::SampledImage, K::StorageImage}), wg);
     addPipeline("flow.prop", kFlow_prop, std::size(kFlow_prop),
                 spec({K::Sampler, K::SampledImage, K::SampledImage, K::SampledImage, K::StorageImage}), wg);
     addPipeline("flow.smooth", kFlow_smooth, std::size(kFlow_smooth), spec({K::Sampler, K::SampledImage, K::StorageImage}), wg);
