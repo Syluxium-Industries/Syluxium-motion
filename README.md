@@ -28,8 +28,9 @@ frame (pacing) and presenting them are up to the program that uses it.
   occlusion handling at moving-object edges, and brightness-matched candidate comparison.
 - Command buffers are pre-recorded; one timeline semaphore orders everything.
 
-Measured on an RX 7700 XT (sustained): about 1.1-1.3 ms per generated frame at 720p, 1.6-2.0 ms at
-1080p, under 0.1 ms for each extra frame at higher multipliers. Weak spots: very fast motion and thin
+Measured on an RX 7700 XT (sustained): about 1.3 ms per real frame at 720p, 2.0 ms at 1080p and
+3.2 ms at 1440p with one generated frame; each extra generated frame adds about 0.25-0.45 ms. Performance
+mode: about 1.35 ms at 1080p. Weak spots: very fast motion and thin
 repeating patterns (fences).
 
 ## Requirements
